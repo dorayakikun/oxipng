@@ -786,7 +786,6 @@ fn perform_reductions(
 
 /// Keep track of processing timeout
 pub(crate) struct Deadline {
-    start: Instant,
     timeout: Option<Duration>,
     print_message: AtomicBool,
 }
@@ -794,7 +793,6 @@ pub(crate) struct Deadline {
 impl Deadline {
     pub fn new(timeout: Option<Duration>, verbose: bool) -> Self {
         Self {
-            start: Instant::now(),
             timeout,
             print_message: AtomicBool::new(verbose),
         }
@@ -804,16 +802,6 @@ impl Deadline {
     ///
     /// If the verbose option is on, it also prints a timeout message once.
     pub fn passed(&self) -> bool {
-        if let Some(timeout) = self.timeout {
-            let elapsed = self.start.elapsed();
-            if elapsed > timeout {
-                if self.print_message.load(Ordering::Relaxed) {
-                    self.print_message.store(false, Ordering::Relaxed);
-                    eprintln!("Timed out after {} second(s)", elapsed.as_secs());
-                }
-                return true;
-            }
-        }
         false
     }
 }
