@@ -14,7 +14,7 @@ use crate::reduction::*;
 use crc::crc32;
 use image::{DynamicImage, GenericImageView, ImageFormat, Pixel};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{copy, File};
 use std::io::{stdin, stdout, BufWriter, Read, Write};
@@ -446,7 +446,7 @@ pub fn optimize_from_memory(data: &[u8], opts: &Options) -> PngResult<Vec<u8>> {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 /// Defines options to be used for a single compression trial
 struct TrialOptions {
     pub filter: u8,
@@ -477,7 +477,7 @@ fn optimize_png(
             eprintln!(
                 "    {} bits/pixel, {} colors in palette",
                 png.raw.ihdr.bit_depth,
-                palette.len() / 3
+                palette.len()
             );
         } else {
             eprintln!(
@@ -636,7 +636,7 @@ fn optimize_png(
             }
         });
         let best: Option<TrialWithData> =
-            best.reduce_with(|i, j| if i.1.len() <= j.1.len() { i } else { j });
+            best.reduce_with(|i, j| if i.1.len() < j.1.len() || (i.1.len() == j.1.len() && i.0 < j.0) { i } else { j });
 
         if let Some(better) = best {
             png.idat_data = better.1;
@@ -784,17 +784,25 @@ fn perform_reductions(
     try_alpha_reductions(png, &opts.alphas, eval);
 }
 
+struct DeadlineImp {
+    start: Instant,
+    timeout: Duration,
+    print_message: AtomicBool,
+}
+
 /// Keep track of processing timeout
 pub(crate) struct Deadline {
-    timeout: Option<Duration>,
-    print_message: AtomicBool,
+    imp: Option<DeadlineImp>,
 }
 
 impl Deadline {
     pub fn new(timeout: Option<Duration>, verbose: bool) -> Self {
         Self {
-            timeout,
-            print_message: AtomicBool::new(verbose),
+            imp: timeout.map(|timeout| DeadlineImp {
+                start: Instant::now(),
+                timeout,
+                print_message: AtomicBool::new(verbose),
+            })
         }
     }
 
@@ -802,6 +810,16 @@ impl Deadline {
     ///
     /// If the verbose option is on, it also prints a timeout message once.
     pub fn passed(&self) -> bool {
+        if let Some(imp) = &self.imp {
+            let elapsed = imp.start.elapsed();
+            if elapsed > imp.timeout {
+                if imp.print_message.load(Ordering::Relaxed) {
+                    imp.print_message.store(false, Ordering::Relaxed);
+                    eprintln!("Timed out after {} second(s)", elapsed.as_secs());
+                }
+                return true;
+            }
+        }
         false
     }
 }
@@ -812,7 +830,7 @@ fn report_reduction(png: &PngImage) {
         eprintln!(
             "Reducing image to {} bits/pixel, {} colors in palette",
             png.ihdr.bit_depth,
-            palette.len() / 3
+            palette.len()
         );
     } else {
         eprintln!(
@@ -831,11 +849,15 @@ fn perform_strip(png: &mut PngData, opts: &Options) {
         // Strip headers
         Headers::None => (),
         Headers::Keep(ref hdrs) => {
-            raw.aux_headers.retain(|chunk, _| {
-                std::str::from_utf8(chunk)
+            let keys: Vec<[u8; 4]> = raw.aux_headers.keys().cloned().collect();
+            for hdr in &keys {
+                let preserve = std::str::from_utf8(hdr)
                     .ok()
-                    .map_or(false, |name| hdrs.contains(name))
-            });
+                    .map_or(false, |name| hdrs.contains(name));
+                if !preserve {
+                    raw.aux_headers.remove(hdr);
+                }
+            }
         }
         Headers::Strip(ref hdrs) => {
             for hdr in hdrs {
@@ -847,8 +869,12 @@ fn perform_strip(png: &mut PngData, opts: &Options) {
                 *b"cHRM", *b"gAMA", *b"iCCP", *b"sBIT", *b"sRGB", *b"bKGD", *b"hIST", *b"pHYs",
                 *b"sPLT",
             ];
-            raw.aux_headers
-                .retain(|hdr, _| PRESERVED_HEADERS.contains(hdr));
+            let keys: Vec<[u8; 4]> = raw.aux_headers.keys().cloned().collect();
+            for hdr in &keys {
+                if !PRESERVED_HEADERS.contains(hdr) {
+                    raw.aux_headers.remove(hdr);
+                }
+            }
         }
         Headers::All => {
             raw.aux_headers = HashMap::new();
