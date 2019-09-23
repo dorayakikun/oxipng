@@ -1,6 +1,4 @@
 use num_cpus;
-#[cfg(feature = "parallel")]
-extern crate rayon;
 #[cfg(not(feature = "parallel"))]
 mod rayon;
 
@@ -321,10 +319,6 @@ impl Default for Options {
 /// Perform optimization on the input file using the options provided
 pub fn optimize(input: &InFile, output: &OutFile, opts: &Options) -> PngResult<()> {
     // Initialize the thread pool with correct number of threads
-    #[cfg(feature = "parallel")]
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(opts.threads)
-        .build_global();
 
     // Read in the file and try to decode as PNG.
     if opts.verbosity.is_some() {
@@ -420,10 +414,6 @@ pub fn optimize(input: &InFile, output: &OutFile, opts: &Options) -> PngResult<(
 /// loaded in-memory
 pub fn optimize_from_memory(data: &[u8], opts: &Options) -> PngResult<Vec<u8>> {
     // Initialize the thread pool with correct number of threads
-    #[cfg(feature = "parallel")]
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(opts.threads)
-        .build_global();
 
     // Read in the file and try to decode as PNG.
     if opts.verbosity.is_some() {
@@ -524,137 +514,6 @@ fn optimize_png(
         eval.set_baseline(png.raw.clone());
     }
     perform_reductions(png.raw.clone(), opts, &deadline, &eval);
-    let reduction_occurred = if let Some(result) = eval.get_result() {
-        *png = result;
-        true
-    } else {
-        false
-    };
-
-    if opts.idat_recoding || reduction_occurred {
-        // Go through selected permutations and determine the best
-        let combinations = if opts.deflate == Deflaters::Zlib && !deadline.passed() {
-            filter.len() * compression.len() * strategies.len()
-        } else {
-            filter.len()
-        };
-        let mut results: Vec<TrialOptions> = Vec::with_capacity(combinations);
-
-        for f in &filter {
-            if opts.deflate == Deflaters::Zlib {
-                for zc in compression {
-                    for zs in &strategies {
-                        results.push(TrialOptions {
-                            filter: *f,
-                            compression: *zc,
-                            strategy: *zs,
-                        });
-                    }
-                    if deadline.passed() {
-                        break;
-                    }
-                }
-            } else {
-                // Zopfli compression has no additional options
-                results.push(TrialOptions {
-                    filter: *f,
-                    compression: 0,
-                    strategy: 0,
-                });
-            }
-
-            if deadline.passed() {
-                break;
-            }
-        }
-
-        if opts.verbosity.is_some() {
-            eprintln!("Trying: {} combinations", results.len());
-        }
-
-        let filter_iter = filter.par_iter().with_max_len(1);
-        let filters: HashMap<u8, Vec<u8>> = filter_iter
-            .map(|f| {
-                let png = png.clone();
-                (*f, png.raw.filter_image(*f))
-            })
-            .collect();
-
-        let original_len = original_png.idat_data.len();
-        let added_interlacing = opts.interlace == Some(1) && original_png.raw.ihdr.interlaced == 0;
-
-        let best_size = AtomicMin::new(if opts.force { None } else { Some(original_len) });
-        let results_iter = results.into_par_iter().with_max_len(1);
-        let best = results_iter.filter_map(|trial| {
-            if deadline.passed() {
-                return None;
-            }
-            let filtered = &filters[&trial.filter];
-            let new_idat = if opts.deflate == Deflaters::Zlib {
-                deflate::deflate(
-                    filtered,
-                    trial.compression,
-                    trial.strategy,
-                    opts.window,
-                    &best_size,
-                    &deadline,
-                )
-            } else {
-                deflate::zopfli_deflate(filtered)
-            };
-
-            let new_idat = match new_idat {
-                Ok(n) => n,
-                Err(PngError::DeflatedDataTooLong(max)) if opts.verbosity == Some(1) => {
-                    eprintln!(
-                        "    zc = {}  zs = {}  f = {}       >{} bytes",
-                        trial.compression, trial.strategy, trial.filter, max,
-                    );
-                    return None;
-                }
-                _ => return None,
-            };
-
-            // update best size across all threads
-            let new_size = new_idat.len();
-            best_size.set_min(new_size);
-
-            if opts.verbosity == Some(1) {
-                eprintln!(
-                    "    zc = {}  zs = {}  f = {}        {} bytes",
-                    trial.compression,
-                    trial.strategy,
-                    trial.filter,
-                    new_idat.len()
-                );
-            }
-
-            if new_size < original_len || added_interlacing || opts.force {
-                Some((trial, new_idat))
-            } else {
-                None
-            }
-        });
-        let best: Option<TrialWithData> =
-            best.reduce_with(|i, j| if i.1.len() < j.1.len() || (i.1.len() == j.1.len() && i.0 < j.0) { i } else { j });
-
-        if let Some(better) = best {
-            png.idat_data = better.1;
-            if opts.verbosity.is_some() {
-                let opts = better.0;
-                eprintln!("Found better combination:");
-                eprintln!(
-                    "    zc = {}  zs = {}  f = {}        {} bytes",
-                    opts.compression,
-                    opts.strategy,
-                    opts.filter,
-                    png.idat_data.len()
-                );
-            }
-        } else if reduction_occurred {
-            *png = original_png;
-        }
-    }
 
     perform_strip(png, opts);
 
@@ -802,7 +661,7 @@ impl Deadline {
                 start: Instant::now(),
                 timeout,
                 print_message: AtomicBool::new(verbose),
-            })
+            }),
         }
     }
 
