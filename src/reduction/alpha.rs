@@ -6,8 +6,6 @@ use crate::png::scan_lines::ScanLine;
 use crate::png::PngImage;
 #[cfg(not(feature = "parallel"))]
 use crate::rayon::prelude::*;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -18,7 +16,7 @@ pub(crate) fn try_alpha_reductions(
 ) {
     assert!(!alphas.is_empty());
     let alphas = alphas.iter().collect::<Vec<_>>();
-    let alphas_iter = alphas.par_iter().with_max_len(1);
+    let alphas_iter = alphas.iter();
     alphas_iter
         .filter_map(|&alpha| filtered_alpha_channel(&png, *alpha))
         .for_each(|image| eval.try_image(Arc::new(image), 0.99));
